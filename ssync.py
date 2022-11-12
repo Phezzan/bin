@@ -619,7 +619,7 @@ class Manga:
         return self._check_aliases(otherName)
 
 
-class _RX:
+class _RX:                                          # Regular expression components
     SEP = r'\.'
     SPC = r'[ _.]'
     HEX = r'[0-9A-Fa-f]'
@@ -636,18 +636,18 @@ class _RX:
     CHAPTER = fr'(\b(?i:c|ch|chapter|\.*#))[#. -]*(?P<number>{CHAPTER_NUM}(-{CHAPTER_NUM})?)(v[1-9])?'
     NUMBER = fr'(:?^|[.#])(?P<number>{CHAPTER_NUM}(-{CHAPTER_NUM})?)(v[1-9])?'
     VERSION= r'(?:[1-9](?:\.[0-9])?|0(?:\.[0-9]{1,3}))'
-    TITLE_B= r'(?P<title>[a-zA-Z0-9].+)'
-    TITLE  = rf'-[.]{TITLE_B}'
-    TITLE_Q= rf'({QUOTE}){TITLE_B}\1'
-    TITLE_G= rf'「{TITLE_B}」'
-    TITLE_E= r'(?P<title>Episode.\d+(\.?[^[]+)*)'
-    GROUP  = r'(?i:uploaded.by.)?(?P<group>[a-zA-Z0-9][^-]+)'
-    GROUP_B= r'\[(?P<group>[a-zA-Z0-9][^]]*)\]'
+    _TITLE= r'(?P<title>[a-zA-Z0-9].+)'            # a title - very broad
+    TITLE  = rf'-[.]{_TITLE}'                      # a title after a dash - commonly: {group} vol ## ch ## - {title}
+    TITLE_Q= rf'({QUOTE}){_TITLE}\1'               # a quoted title using **identical** quote glyphs
+    TITLE_G= rf'[“「]{_TITLE}[」”]'                 # a quoted title using different (rare) glyphs
+    TITLE_E= r'(?P<title>Episode.\d+(\.?[^[]+)*)'  # a title that starts like: Episode 27 the cat in the hat
+    GROUP_B= r'\[(?P<group>[a-zA-Z0-9][^]]*)\]'    # a group name in square brackets
+    GROUP  = r'(?i:uploaded.by.)?(?P<group>[a-zA-Z0-9][^-]+)'   # Match a group name called out with 'uploaded by'
     YEAR   = r'(?:\W)(?P<year>(19|20)\d{2})(?:\W)'
 
 
 class Chapter:
-    _RE = [(re.compile(r), f) for r, f in [
+    _RE = [(re.compile(r), f) for r, f in [         # a list of RX used to clean and extract info from filenames
         (_RX.CLEAN_SPC, None),
         (_RX.VOLUME, 'volume'),
         (_RX.GROUP_B, 'group'),
@@ -670,8 +670,8 @@ class Chapter:
                  group: str = None,
                  volume: int = None,
                  title: str = None):
-        clean = lambda s: re.sub(r'(^[. _-]+|[. _-]+$)', '', s) if s else None
-        self.title = clean(title)
+        trim = lambda s: re.sub(r'(^[. _-]+|[. _-]+$)', '', s) if s else None
+        self.title = trim(title)
         if not number and not volume:
             raise ValueError(f"number or volume is required: [{number}]")
         num = number
@@ -683,17 +683,27 @@ class Chapter:
         elif type(number) in (int, float):
             num = [number]
         self.numbers = set(num)
-        self.group = clean(group)
+        self.group = trim(group)
         self.volume = volume
         self.path = path
 
+    @staticmethod
+    def name_to_pattern(name: str):
+        return re.sub('[. ]+', name.lower(), '.')
+
     @classmethod
     def build(cls, manga: Manga, path: Path) -> 'Chapter':
+        """ builds a chapter from a file path using regular expressions
+        :param manga: The mange to which this file belongs - removed from the filename to
+        :param path:
+        :return:
+        """
         if path.is_file() and '.' in path.name:
             name, ext = path.name.rsplit('.', 1)
         else:
             name = path.name
-        name = name.replace(manga.name, '.')
+        name = re.sub(_RX.CLEAN_DASH, name, '.')
+        name = name.replace(cls.name_to_pattern(manga.name), '.')
         parts = {'path': path}
         for regex, field in cls._RE:
             if field and field in parts:
