@@ -134,7 +134,9 @@ def spin(progress: float = None, text: str = ''):
     import shutil
     cols = shutil.get_terminal_size((130, 1))[0] - 2
     chars = r'\|/-' * 2
-    if progress == 0:
+    if progress is None:
+        msg = '\n'
+    elif progress == 0:
         msg = '. 0% '
     elif progress > 0.99:
         msg = f'100% '
@@ -175,6 +177,24 @@ class Scans:
                 # noinspection PyTypeChecker
                 cls._dirs[path] = [Path(p) for p in it]
         return cls._dirs.get(path, [])
+
+
+def bookends(nums: Set[float or int]) -> (float, float):
+    """ condenses set of numbers into ranges: [1,2,3,5] -> [(1,3), (5,5)]"""
+    nums = list(sorted(nums))
+    start, end, step = 0, 0, 1
+    pairs = []
+    for i in nums:
+        if not start or i > round(end + step, 3):
+            if end:
+                pairs.append((start, end))
+            start = end = i
+            step = round(start - int(start), 3) or 1
+        else:
+            end = i
+    if end:
+        pairs.append((start, end))
+    return pairs
 
 
 def ranges(start, *ends):
@@ -231,13 +251,14 @@ class Manga:
             path = Path(path)
         path = path.resolve()
         self.path = path.joinpath('manga.yml') if path.suffix != '.yml' else path
+        self.seasons = {re.compile(k): v for k, v in _.get('seasons', {}).items()}
         self.name = name or self.path.parent.name
         self.aliases = set(re.compile(p, flags=re.IGNORECASE) for p in aliases or [])
         parent = self.path.parent
         self.group = self.group_name(group)
         self.created = 0
         self.bytes = 0
-        self.history = {}
+        self.errors = {}
         self._disabled = disabled
         self._dirty = dirty
         # TODO - try to guess aliases?
@@ -263,6 +284,7 @@ class Manga:
             return chapters
         for path in Scans.scandir(parent):
             if _args.file_filter.match(path.name):
+                self.errors.setdefault('Filter', set()).add(f"{path.parent}/{path.name}")
                 continue
             if path.is_file():
                 try:
@@ -270,14 +292,13 @@ class Manga:
                     if len(t) != 2 or t[1] not in self.SUFFIXES['ARCHIVE']:
                         continue    # skip yml, txt, etc
                 except ValueError as e:
-                    logging.error(f"Failed reading {path} ---")
-                    print(e)
+                    self.errors.setdefault('Read', set()).add(f"{path.parent}/{path.name}")
                     continue
             try:
                 c = Chapter.build(self, path)
                 chapters.append(c)
-            except TypeError as e:
-                logging.error(f"Skipping: {path}")
+            except (TypeError, ValueError) as e:
+                self.errors.setdefault('Parser', set()).add(f"{path.parent}/{path.name}")
         return chapters
 
     def _all_chapters(self):
@@ -294,10 +315,11 @@ class Manga:
         di = {'name': self.name,  # in case we rename the directory then we'll still have the name
               'aliases': [str(a.pattern) for a in self.aliases],
               'group': self.group,
+              'seasons': {k: repr(v) for k, v in self.seasons.items()},
+              'disabled': self._disabled,
               # chapters not saved - presently they're just a dumb list of directory strs
               }
-        if self._disabled:
-            di['disabled'] = self._disabled
+        di = {k: v for k, v in di.items() if v or k not in ['chapters']}
         if relative:
             # path is only useful when relative to a directory metadata
             if relative.is_file():
@@ -330,7 +352,7 @@ class Manga:
             return False
         with open(self.path, 'w') as f:
             # path is not saved, as it _is_always_ the filesystem path to this saved file
-            yaml.safe_dump(self.asDict(), stream=f)
+            yaml.dump(self.asDict(), stream=f)
             return True
 
     @classmethod
@@ -363,7 +385,7 @@ class Manga:
                            for m in sorted(mangas, key=lambda v:v.name)])
         if not _args.dry:
             with open(path, 'wt') as f:
-                yaml.safe_dump(_directory, stream=f)
+                yaml.dump(_directory, stream=f)
             logging.info(f"Saved directory[{len(_directory)}] to <{path_dir}>")
         else:
             logging.info(f"DRY!! directory[{len(_directory)}] to <{path_dir}>")
@@ -401,7 +423,7 @@ class Manga:
 
         path_dir = path.parent
         with open(path, 'r') as f:
-            data = yaml.safe_load(f)
+            data = yaml.unsafe_load(f)
         cls._directories[path] = data
 
         def Manga_from(path: str, **kwargs) -> Manga or None:
@@ -501,6 +523,15 @@ class Manga:
             return [cls.create(path.parent)]
 
     @classmethod
+    def all_errors(cls) -> dict:
+        rv = {}
+        for manga in cls.all.values():
+            for k, v in manga.errors.items():
+                s = rv.setdefault(k, set())
+                s |= v
+        return rv
+
+    @classmethod
     def directory(cls, path: Path, mangas: Iterable['Manga'] = None, recurse: bool = False) -> Set['Manga']:
         # returns all manga under path, including manga in subdirs iff recurse
         # ex: path/mangaTitle{1..10}/ but not path/subpath/mangaTitleRecurse/ and never path/manga.yml
@@ -550,7 +581,7 @@ class Manga:
 
         # only sync missing chapters
         missing = []
-        for m in dest.missing(self):
+        for m in dest.missing(set(self.chapters)):
             missing.extend(self.chapters[m])
         for miss in missing:
             if _args.filter.fullmatch(miss.path.name):
@@ -573,11 +604,55 @@ class Manga:
         logging.info(f"sync {self.name} -> {dest.name} [{count}]:{', '.join(str(m) for m in missing)}")
         return files, bytes
 
-    def missing(self, source: 'Manga') -> Set[float or int]:
+    def missing(self, source: Set[float]) -> Set[float or int]:
         """Returns the NAMEs of chapters present in source but not self"""
         if self._disabled:
             return set()
-        return set(source.chapters) - set(self.chapters)
+        return source - set(self.chapters)
+
+    def gaps(self) -> Set[float or int]:
+        if not self.chapters:
+            return set()
+        chapters = set(self.chapters) | {1}
+        start, end = min(chapters), max(self.chapters)
+        return self.missing(set(ranges(start, end)))
+
+    def gaps2(self) -> (list, List[float or int]):
+        # if 1 not in chapters and 1.1 not in chapters:
+        #    chapters += {1}
+        def _pair(c):
+            subc = c - int(c)
+            while subc != int(subc):
+                subc *= 10
+            return (c, subc)
+
+        def _pairrange(si, se, ei, ee):
+            subc_max = max(se, ee)
+            decimal = len(str(subc_max))
+            if si == ei:
+                return [si + round(x / (10 ^ decimal),decimal) for x in range(se + 1, ee)]
+            else:
+                rv = []
+                for _ in range(si + 1, ei+1):
+                    rv.extend(_pairrange(_, 0, _, ee))
+                return set(rv)
+
+        prev = 0
+        missing: List[(float, float)] = []
+        dups: list = []
+        for chp in sorted(self.chapters):
+            c0, cs = _pair(chp)
+            p0, ps = _pair(prev)
+            # d0, ds = c0 - p0, cs - ps
+
+            missing.extend(_pairrange(c0, cs, p0, ps))
+
+        return missing, dups
+
+    @property
+    def gap_str(self):
+        gaps = [f"{a}-{b}" if a != b else str(a) for a, b in bookends(self.gaps())]
+        return f"{self.name}: {', '.join(gaps)}"
 
     def rename_all(self):
         chapters = set()
@@ -626,7 +701,7 @@ class _RX:                                          # Regular expression compone
     CLEAN_HEX = fr'\[{HEX}{{8}}]'
     CLEAN_SEP = fr'{SEP}+'
     CLEAN_SPC = fr'{SPC}+'
-    QUOTE = r'[`"\']'
+    QUOTE = r'[`"\'](?![sm]\b)'
     CLEAN_DASH = r'\.*-?\.+'
     EPISODE = r'(?:e|E|ep|EP|episode(.)?|[Xx#.])(?P<episode>\d{2,3}(-\d{2,3})?([vp.]\d)?)' \
               r'(?=(\.|\[[^]]+\]|\([^)]+\)|[A-Za-z_]\w*)*$)'
@@ -714,6 +789,8 @@ class Chapter:
                 parts.update({k: v for k, v in match.groupdict().items() if v})
         if 'volume' in parts and 'number' not in parts:
             parts['number'] = 0
+        if 'number' not in parts:
+            raise ValueError("Unable to parse chapter number")
         return cls(**parts)
 
     @property
@@ -769,6 +846,7 @@ def get_args():
     parser.add_argument('-c', '--create', help="Copy unmatched sources into destination", action='store_true', default=1)
     parser.add_argument('-n', '--dry', help="Don't sync sources to destination", action='store_true')
     parser.add_argument('-v', '--verbose', action='count', default=0)
+    parser.add_argument('-e', '--errors', help="Show missing chapters and other errors", action='count', default=0)
     parser.add_argument('-i', '--ignore', action='extend', nargs='+', default=['.*'])
     parser.add_argument('--full_sync', help="Don't skip sources based on existing chapter directories", action='store_true')
     parser.add_argument('-f', '--filter', type=str, help="a RegEx that ignores source chapters", default='\..*|.*_tmp|~.*')
@@ -809,17 +887,22 @@ def build_ignores(ignores=None) -> set:
     return ignores
 
 
-def read(source: Path, ignores=None, load_metadata=True):
+def read(source: Path, ignores=None, load_metadata=True) -> list:
     global _args
     if source is None:
-        return None
+        return []
     Times.start("LOAD")
 
     srcs = Manga.create_all(source.expanduser(), ignores=ignores, do_load=load_metadata, spinner=spin)
     srcs = list(filter(lambda v: bool(v), srcs))
-    logging.info("Found: {}".format(pformat({v.name: v.path for v in srcs})))
+    spin()
+    logging.debug("Found: {}".format(pformat({v.name: v.path for v in srcs})))
     if not srcs:
         raise RuntimeError(f"{source} nothing found in source")
+    else:
+        for k, v in Manga.all_errors().items():
+            for msg in v:
+                logging.error(f"{k} - {msg}")
     print(f"Loaded {source.name}: {Times.stop('LOAD'):4.2f}s")
     return srcs
 
@@ -859,7 +942,7 @@ def do_sync(srcs: List[Manga], dsts: List[Manga], copy_fails: dict = None) -> Di
         dst = None
         try:
             dst = dsts[dsts.index(src)]
-            if not _args.full_sync and not dst.missing(src):
+            if not _args.full_sync and not dst.missing(set(src.chapters)):
                 logging.debug(f"{src.name}[{len(src.chapters)}] ~= [{len(dst.chapters)}]{dst.name}")
                 continue
         except ValueError:
@@ -896,6 +979,11 @@ def work():
     srcs = read(source, load_metadata=False)
     # Infer (or load) destination manga directories
     dsts = read(dest, ignores={source})
+
+    if _args.errors:
+        for s in (*dsts, *srcs):
+            if s.gaps():
+                print(s.gap_str)
 
     if _args.rename:
         for s in dsts:

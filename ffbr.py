@@ -81,36 +81,36 @@ def scan(files: set):
     global _args, max_width, results
     for f in files:
         if os.path.isdir(f):
-            if args.recurse:
-                dir = read_dir(f, suffixes=args.suffixes)
+            if _args.recurse:
+                dir = read_dir(f, suffixes=_args.suffixes)
                 logging.info(f'adding: {f.name}/ [{len(dir)}]')
-                args.filenames = args.filenames.union(dir)
-            args.filenames.discard(f)
+                _args.filenames = _args.filenames.union(dir)
+            _args.filenames.discard(f)
             logging.info(f'discard: {f.name}')
             continue
         max_width = max(max_width, len(f.name))
         try:
             duration, size, br = get_bitrate(f)
             results[f] = (br, duration, size)
-            if not args.quiet and not args.verbose:
+            if not _args.quiet and not _args.verbose:
                 print('.', end='', flush=True)
         except ValueError as e:
-            args.filenames.discard(f)
+            _args.filenames.discard(f)
             logging.info(f"skipping: {f.name}")
 
         except TypeError as e:
-            args.filenames.discard(f)
+            _args.filenames.discard(f)
             logging.exception(f"{f.name}: {e}")
 
-    if not args.quiet and not args.verbose:
+    if not _args.quiet and not _args.verbose:
         print()
 
 def prep_args():
     global _args
-    if args.suffixes in SUFFIXES:
-        args.suffixes = SUFFIXES[args.suffixes]
+    if _args.suffixes in SUFFIXES:
+        _args.suffixes = SUFFIXES[_args.suffixes]
     else:
-        args.suffixes = args.suffixes.split(',') or []
+        _args.suffixes = _args.suffixes.split(',') or []
 
 
 def main():
@@ -118,25 +118,25 @@ def main():
     prep_args()
     max_width = 0
     results = {}
-    args.filenames = set([Path(f).resolve() for f in args.filenames])
-    logging.root.setLevel(logging.INFO if args.verbose else logging.WARNING)
-    if len(args.filenames) == 1:
-        filename = args.filenames.pop()
+    _args.filenames = set([Path(f).resolve() for f in _args.filenames])
+    logging.root.setLevel(logging.INFO if _args.verbose else logging.WARNING)
+    if len(_args.filenames) == 1:
+        filename = _args.filenames.pop()
         if filename.is_dir():
-            args.filenames = read_dir(filename, suffixes=args.suffixes)
+            _args.filenames = read_dir(filename, suffixes=_args.suffixes)
         else:
-            args.filenames.add(filename)
+            _args.filenames.add(filename)
 
-    if args.simple:
-        duration, size, br = get_bitrate(args.filenames.pop())
+    if _args.simple:
+        duration, size, br = get_bitrate(_args.filenames.pop())
         print(int(br))
         return 0
 
-    while len(results) < len(args.filenames):
-        scan(args.filenames - set(results.keys()))
-        logging.info(f'[{len(results)}] / [{len(args.filenames)}]')
+    while len(results) < len(_args.filenames):
+        scan(_args.filenames - set(results.keys()))
+        logging.info(f'[{len(results)}] / [{len(_args.filenames)}]')
     max_width += 1
-    if not args.quiet:
+    if not _args.quiet:
         print(f"Bitrate {'Name':{max_width}} {'Duration'}")
     for path, v in sorted(results.items(), key=lambda t: t[1][0], reverse=False):
         br, duration, size = v
