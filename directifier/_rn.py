@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
-# Bulk renamer.
-# Classify input files
+# Classifiers for media files
 #   Classes: [ [Regex, CLASS] ... ]
 
 # Choose rename rules based on class
@@ -23,15 +22,12 @@ import grp
 import pwd
 
 
-config: 'Config'
-PATHS = {'': (None, None)}
-PERMISSIONED = set()
 
 SEP       = r'.'
 SEP_RX    = r'[ _.]'
-EPISODE_RX = r'(?:e|E|ep|EP|episode|[Xx#.])(?P<episode>\d{2,3}(-\d{2,3})?([vp.]\d)?)'
-BLOCK_RX   = r'(?=(\.|\[[^]]+\]|\([^)]+\)|[A-Za-z_]\w*)*)$'
-SEASON_EP_RX = r'(?:S|s|season)?(?P<season>(?:[1-5]|[0-3][0-9]?))'+EPISODE_RX
+EPISODE_RX = r'(?:e|E|ep|EP|episode(.)?|[Xx#.])(?P<episode>\d{2,3}(-\d{2,3})?([vp.]\d)?)'\
+        r'(?=(\.|\[[^]]+\]|\([^)]+\)|[A-Za-z_]\w*)*$)'
+SEASON_EP_RX = rf'(?:S|s|season)?(?P<season>[0-3][0-9]?){EPISODE_RX}'
 
 VERSION_RX= r'(?:[1-9](?:\.[0-9])?|0(?:\.[0-9]{1,3}))'
 GROUP_RX  = r'(?P<group>\[[a-zA-Z0-9][^]]+\])'
@@ -39,9 +35,9 @@ TITLE_RX  = r'(?P<title>[a-zA-Z0-9](.?[a-zA-Z0-9!@&+,:-]+)*[+a-zA-Z0-9]+)'
 YEAR_RX   = r'(?:\W)(?P<year>(19|20)\d{2})(?:\W)'
 
 RIP_RX    = r'(?i:multi|webrip|web-dl|brrip|bluray|hdtv|hevc|10bit)'
-VIDEO_RX  = r'(?:\d{3,4}x\d{3,4}|720p|480p|1080p|[hHxX][._ ]?26[45])' 
+VIDEO_RX  = r'(?:\d{3,4}x\d{3,4}|720p|480p|1080p|x26[45])' 
 SOUND_RX  = rf'(?:(?:6|2|5|5.1)CH|AAC({VERSION_RX})?)'
-SUB_RX    = r'\b(?i:(en|fr|jp|jpn|ger)([. -]sub)?)\b'
+SUB_RX    = r'(?i:(en|fr|jp|jpn|ger)[. -]sub)'
 ENCODE_RX = rf'\b(?:{VIDEO_RX}|{SOUND_RX}|{RIP_RX})\b'
 
 LOG_FORMAT= r'%(message)s'
@@ -126,14 +122,14 @@ class Renamer(object):
         with open(path + '/' + name, mode='w') as renameCfg:
             json.dump(self.__dict__, renameCfg)
 
-    def canName(self, filename):
-        name, ext = os.path.splitext(filename)
+    def canName(self, fn):
+        name, ext = os.path.splitext(fn)
         ext = ext.lower()
         if not ext in self.ext:
             logging.debug("%s not in %s" %(ext, self.ext))
             return None
 
-        statinfo = os.stat(filename)
+        statinfo = os.stat(fn)
         size = statinfo.st_size
         if size > self.size[1] or size < self.size[0]:
             logging.info("%s bad size: %d<%s<%d" %(self.name, self.size[0], name, self.size[1]))
@@ -163,7 +159,6 @@ class Renamer(object):
         for reg in self.clean:
             name = reg.sub(SEP, name)
 
-        # run each regex to find parts: (chapter, vol, group, ...)
         for reg in self.rx:
             match = reg.search(name)
             if match:
@@ -172,8 +167,7 @@ class Renamer(object):
                     if v:
                         parts[k] = v
                 logging.debug("%-8s:%45s gdict: %s" % (self.name, name, gdict))
-                # now 'mute' this regex (by replacing what we matched with '.') and continue
-                name = reg.sub(SEP, name)
+                name = reg.sub('.', name)
             else:
                 logging.debug("%-8s:%45s fail: %s" % (self.name, name, reg))
 
@@ -183,7 +177,7 @@ class Renamer(object):
         for f in self.nameFmt:
             try:
                 name = f.format(**parts)
-            except (IndexError, KeyError):
+            except:
                 logging.debug("missing bits: %s", f)
                 name = None
                 continue
@@ -196,56 +190,10 @@ class Renamer(object):
         return name
 
 
-def get_path_owners(path=None):
-    global PATHS
-    if path not in PATHS:
-        stat = os.stat(path)
-        PATHS[path] = (user_name(stat.st_uid), group_name(stat.st_gid))
-    elif type(PATHS.get(path)) is not tuple:
-        PATHS[path] = (None, None)
-    return PATHS[path]
-
-
-def chown(fn, user=None, group=None):
-    from shutil import chown as sh_chown
-    logging.info("chown %s:%s '%s'"%(user, group, fn))
-    if user or group:
-        sh_chown(fn, user, group)
-        PATHS[fn] = None
-
-
-def set_usr_grp(fn, user=None, group=None):
-    global PERMISSIONED, config
-    #if fn in AUTH_DONE:
-    #    return False
-    logging.info("Auth: %s %s:%s" % (fn, user, group))
-
-    dir_name = os.path.dirname(fn) if not config.files[fn] else fn
-    dir_user, dir_group = get_path_owners(dir_name)
-    if not user or user not in VALID_USERS:
-        user = dir_user
-    if not group or group not in VALID_GROUPS:
-        group = dir_group
-
-    cur_user, cur_group = get_path_owners(fn)
-    logging.info("USR:GRP %s:%s -> %s:%s" % (cur_user, cur_group, user, group))
-    if user == cur_user:
-        user = None
-    if group == cur_group:
-        group = None
-    chown(fn, user, group)
-
-    mode = S_IRUSR | S_IWUSR | S_IRGRP
-    if config.files[fn]:
-        mode |= S_IXUSR | S_IXGRP
-    os.chmod(fn, mode)
-    #AUTH_DONE.add(fn)
-    return True
-
-
-def main(args: list[str] = None):
+def main():
     global config
-    config   = Config(args)
+    config   = Config()
+    renamers = config.renamers
     choice   = None
     files = {}
     for name in config.files:
@@ -267,13 +215,14 @@ def main(args: list[str] = None):
             print("Not found: %s: %s\n" % (path, base))
             continue
 
-        for r in config.renamers:
+        for r in renamers:
             newBase = r.rename(base)
             if not newBase:
                 logging.debug("%s can't rename %s" % (r.name, base))
                 continue
             choice = r
             break
+
 
         if not choice or not newBase:
             logging.warning("No conversion for '%s'" % base)
@@ -292,7 +241,7 @@ def main(args: list[str] = None):
 #    if files and (not config.nochange and not config.noperm):
 #        for name in config.files:
 #            if name in self.files or path_in_files(name, config.files)
-#                set_usr_grp(name, config.owner, config.group)
+#                set_auth(name, config.owner, config.group)
 
     for k,v in files.items():
         if config.nochange :
@@ -300,12 +249,12 @@ def main(args: list[str] = None):
         elif k == v:
             print("%-8s %40s = %-40s" %("unchanged", k, v))
             if config.perm or config.group or config.owner:
-                set_usr_grp(k, config.owner, config.group)
+                set_group(k, config.owner, config.group)
         elif os.path.exists(v):
             print("%-8s %40s > %-40s" %("collide", k, v))
         else:
             if config.perm or config.group or config.owner:
-                set_usr_grp(k, config.owner, config.group)
+                set_group(k, config.owner, config.group)
             if k != v:
                 os.replace(k,v)
             print("%-8s %40s > %-40s" %("renamed", k, v))
@@ -320,12 +269,10 @@ def path_in_files(path, files):
 
 
 def init_renamers(force: Type) -> Iterable[Renamer]:
-    # return [Renamer(**args) for args in renamers:List[dict] ]
-    renamers = []   # a list of init args for Renamer, because copy is easy
+    renamers = []
 
     s = {
         "name": "Series",
-        # rx - a list of regex
         "rx": [SEASON_EP_RX,
                #r'(?:S|s|season)?(?P<season>\d+)'
                #r'(?:e|E|ep|EP|episode(.)?|[Xx#.])(?P<episode>\d{2,3}(-\d{2,3})?(v\d)?)'
@@ -347,6 +294,7 @@ def init_renamers(force: Type) -> Iterable[Renamer]:
 
     ova         = s.copy()
     ova["parts"]= {"title": None, "season": None, "episode": None}
+
     ova["nameFmt"] = [
                 "{title}"+SEP+"({year})"+SEP+"OVA.E{episode:0>2}"+SEP+"{group}",
                 "{title}"+SEP+"OVA.E{episode:0>2}"+SEP+"{group}",
@@ -375,7 +323,7 @@ def init_renamers(force: Type) -> Iterable[Renamer]:
 
     e           = s.copy()
     e["rx"]     = s['rx'][:]
-    e['rx'][0]  = EPISODE_RX+BLOCK_RX
+    e['rx'][0]  = EPISODE_RX
                 #(  r'(e|E|ep|EP|episode.|\b[Xx#.])(?P<episode>\d{2,3}(-\d{2,3})?(v\d)?)'
                 #   r'(?=(\.|\[[^]]+\]|\([^)]+\)|[^0-9])*$)')
     e["parts"]  = {"title":None, "episode":None }
@@ -392,10 +340,10 @@ def init_renamers(force: Type) -> Iterable[Renamer]:
     s2b["size"] = (KB, MB)
     s2b['name'] = 'Subs2'
 
-    vc = {"name": "Manga.Chapter",
+    vc = {"name" : "Manga.Chapter",
            "rx": [
-               r'((?<=\D)(?P:v|V|vol|Vol|volume|Volume)?(?P<volume>\d{1,2})[.]?)?'
-               r'(?:c|C|ch|CH|Ch|(Chapter\.)|[x#. ])(?P<chapter>\d{2,3}(-\d{2,3}|\.[1-9])?(\.?v\d)?)',
+               r'((?<=\D)(?P<v>v|V|vol|Vol|volume|Volume)?(?P<volume>\d{1,2})[.]?)?'
+               r'(?:c|C|ch|CH|Ch|(Chapter\.)|[x#. ])(?P<chapter>\d{2,3}(-\d{2,3}|\.[1-5])?(\.?v\d)?)',
                GROUP_RX,
                TITLE_RX,
                ],
@@ -464,7 +412,7 @@ def get_groupid(name):
 
 
 class Config(object):
-    def __init__(self, arg_v : list[str] = None):
+    def __init__(self, arg_v=None):
         ap = argparse.ArgumentParser(description="Automatically rename video and comics")
         ap.add_argument("-v", "--verbose", help="enable logging", action='count')
         ap.add_argument("-f", "--force", help="enable logging", type=str)
@@ -477,7 +425,7 @@ class Config(object):
         ap.add_argument("-p", "--permission", default=None, help="set permissions regardless",action='store_true')
         ap.add_argument("files", nargs="+", default=[], help="files to rename")
 
-        args = ap.parse_args(args = arg_v)
+        args = ap.parse_args(arg_v)
         if not args.verbose or args.verbose < 1:
             logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT)
         elif args.verbose > 1:
@@ -543,7 +491,6 @@ class Config(object):
             if c > 5:
                 logging.error("Aborting add_files")
                 break
-
 
 if __name__ == "__main__":
     main()

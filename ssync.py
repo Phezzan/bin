@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 Synchronizes two directories of manga
 Directories in the destination are scanned for 'Manga' objects
@@ -18,11 +18,12 @@ import zipfile as zf
 from shutil import copy2
 from contextlib import contextmanager
 from re import Pattern
-from typing import List, Union, Set, Dict, Iterable, Callable
+from typing import List, Union, Set, Dict, Iterable, Callable, ClassVar
 from pathlib import Path
 from pprint import pformat
 from argparse import ArgumentParser, Namespace
 from math import floor
+from dataclasses import dataclass
 
 logging.basicConfig(level=logging.INFO)
 _args: Namespace
@@ -271,7 +272,7 @@ class Manga:
         else:
             parent.mkdir(mode=0o750, parents=True, exist_ok=True)
 
-        self.chapters: Dict[float, Set[Chapter]] = {}
+        self.chapters: Dict[tuple, Set[Chapter]] = {}
         for c in self._find_chapters(parent=parent):
             for n in c.numbers:
                 self.chapters.setdefault(n, set()).add(c)
@@ -472,6 +473,11 @@ class Manga:
 
     @classmethod
     def create_all(cls, path: Path, ignores: Set[Path] = None, do_load=True, spinner: Callable = None) -> List['Manga'] or None:
+        """
+
+        :param path: a filesystem path
+        :param ignores: paths to skip
+        """
         spinner = spinner or (lambda p: None)
         path = path.resolve()
         if not path or path.is_file() or not path.exists():
@@ -721,6 +727,13 @@ class _RX:                                          # Regular expression compone
     YEAR   = r'(?:\W)(?P<year>(19|20)\d{2})(?:\W)'
 
 
+@dataclass(tuple=True)
+class Chapter_Key:
+    num: float
+    page_count: int
+    group: str = None
+
+
 class Chapter:
     _RE = [(re.compile(r), f) for r, f in [         # a list of RX used to clean and extract info from filenames
         (_RX.CLEAN_SPC, None),
@@ -737,14 +750,15 @@ class Chapter:
         (_RX.GROUP, 'group'),
     ]]
 
-    __slots__ = ['title', 'numbers', 'group', 'volume', 'path']
+    __slots__ = ['title', 'numbers', 'group', 'volume', 'path', 'page_count']
 
     def __init__(self,
                  number: set or str or int or float,
                  path: Path = None,
                  group: str = None,
                  volume: int = None,
-                 title: str = None):
+                 title: str = None,
+                 page_count: int = None):
         trim = lambda s: re.sub(r'(^[. _-]+|[. _-]+$)', '', s) if s else None
         self.title = trim(title)
         if not number and not volume:
@@ -761,6 +775,7 @@ class Chapter:
         self.group = trim(group)
         self.volume = volume
         self.path = path
+        self.page_count = page_count
 
     @staticmethod
     def name_to_pattern(name: str):
@@ -792,6 +807,12 @@ class Chapter:
         if 'number' not in parts:
             raise ValueError("Unable to parse chapter number")
         return cls(**parts)
+
+    @property
+    def keys(self) -> list[tuple]:
+        """
+        :return: a list of chapter keys
+        """
 
     @property
     def key(self) -> tuple:
@@ -849,8 +870,8 @@ def get_args():
     parser.add_argument('-e', '--errors', help="Show missing chapters and other errors", action='count', default=0)
     parser.add_argument('-i', '--ignore', action='extend', nargs='+', default=['.*'])
     parser.add_argument('--full_sync', help="Don't skip sources based on existing chapter directories", action='store_true')
-    parser.add_argument('-f', '--filter', type=str, help="a RegEx that ignores source chapters", default='\..*|.*_tmp|~.*')
-    parser.add_argument('-F', '--file_filter', type=str, help="a RegEx that ignores individual files", default='\..*|.*_tmp|~.*')
+    parser.add_argument('-f', '--filter', type=str, help="a RegEx that ignores source chapters", default=r'\..*|.*_tmp|~.*')
+    parser.add_argument('-F', '--file_filter', type=str, help="a RegEx that ignores individual files", default=r'\..*|.*_tmp|~.*')
     parser.add_argument('-M', '--min_size', type=int, help="min-size (skip tiny or empty files)", default=100)
     parser.add_argument('-O', '--overwrite', help="overwrite existing chapters", action='store_true')
     parser.add_argument('-s', '--source', type=str)
@@ -868,6 +889,7 @@ def get_args():
 
 
 def build_ignores(ignores=None) -> set:
+    """ maintains 'ignores' """
     glob_re = re.compile(r'(\*|.*[^\\][*]).*')
     if type(ignores) is str:
         i = Path(ignores)

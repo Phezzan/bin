@@ -2,11 +2,14 @@
 import re
 import os
 import logging
+from wcwidth import wcswidth  # Far from perfect.
 from typing import Union
 from pathlib import Path
 from argparse import ArgumentParser, Namespace
 from subprocess import Popen, PIPE
 from datetime import timedelta
+from shutil import get_terminal_size
+
 
 VIDEO_EXTS = "avi,mkv,mp4,webm,ogv,ogg,mpeg,mpg,asf,divx,rm"
 AUDIO_EXTS = "mp3,mp4a,mp4,ogg,wav,flac,oga,m3a,riff,opus"
@@ -19,7 +22,7 @@ SUFFIXES = {
 
 def get_args():
     ap = ArgumentParser(description="Calculate the bitrate of a video file")
-    ap.add_argument('filenames', metavar='N', type=str, nargs="+", help="Files to calculate")
+    ap.add_argument('filenames', metavar='N', type=str, nargs="*", help="Files to calculate", default=['.'])
     ap.add_argument('--verbose', '-v', action='store_true', help='just the one number')
     ap.add_argument('--quiet', '-q', action='store_true', help='dont print dots')
     ap.add_argument('--simple', '-s', action='store_true', help='just the one number')
@@ -27,10 +30,19 @@ def get_args():
     ap.add_argument('--suffixes', '-x', type=str, help='comma separated extensions or [video, audio, all]', default='all')
     return ap.parse_args()
 
-
+   
 _args: Namespace = get_args()
+cwd = Path('.').resolve()
 max_width = 0
 results = {}
+
+
+def print_name(p: Path) -> str:
+    global cwd
+    try: 
+        return str(p.relative_to(cwd))
+    except ValueError:
+        return f"{p.parent.name:1}/{p.name}"
 
 
 def get_duration(filename: Path) -> float:
@@ -61,7 +73,7 @@ def get_bitrate(filename: Path) -> tuple:
     return secs, size, size/secs
 
 
-def read_dir(directory: Union[str, Path], suffixes: list, filterFN=None) -> set:
+def read_dir(directory: Union[str, Path], suffixes: set, filterFN=None) -> set:
     filepath = Path(directory) if type(directory) is not Path else directory
     filepath = filepath.resolve()
 
@@ -88,7 +100,7 @@ def scan(files: set):
             _args.filenames.discard(f)
             logging.info(f'discard: {f.name}')
             continue
-        max_width = max(max_width, len(f.name))
+        max_width = max(max_width, wcswidth(print_name(f)))
         try:
             duration, size, br = get_bitrate(f)
             results[f] = (br, duration, size)
@@ -102,21 +114,25 @@ def scan(files: set):
             _args.filenames.discard(f)
             logging.exception(f"{f.name}: {e}")
 
-    if not _args.quiet and not _args.verbose:
+    if not _args.quiet:
         print()
+
 
 def prep_args():
     global _args
-    if _args.suffixes in SUFFIXES:
-        _args.suffixes = SUFFIXES[_args.suffixes]
-    else:
-        _args.suffixes = _args.suffixes.split(',') or []
+    if _args.suffixes:
+        _args.suffixes = set(_args.suffixes.split(',')) or {}
+        for suffix in list(_args.suffixes):
+            if suffix in SUFFIXES:
+                _args.suffixes.discard(suffix)
+                _args.suffixes.update(SUFFIXES[suffix])
 
 
 def main():
     global _args, max_width, results, AUDIO_EXTS, VIDEO_EXTS
     prep_args()
-    max_width = 0
+    term_width = get_terminal_size((120,50)).columns
+    print(f"Term size: {term_width}")
     results = {}
     _args.filenames = set([Path(f).resolve() for f in _args.filenames])
     logging.root.setLevel(logging.INFO if _args.verbose else logging.WARNING)
@@ -135,13 +151,15 @@ def main():
     while len(results) < len(_args.filenames):
         scan(_args.filenames - set(results.keys()))
         logging.info(f'[{len(results)}] / [{len(_args.filenames)}]')
-    max_width += 1
+
     if not _args.quiet:
-        print(f"Bitrate {'Name':{max_width}} {'Duration'}")
+        print(f"Bits/s {'Name':{term_width - 15}} {'Secs':>6}")
     for path, v in sorted(results.items(), key=lambda t: t[1][0], reverse=False):
         br, duration, size = v
-        print(f"{int(round(br/1024)):>7}k {path.name:{max_width}} {int(duration)}s")
-
+        name = print_name(path)
+        if (over := wcswidth(name) - (term_width - 17)) and over > 0:
+            name = f"{name:.{term_width-17}}.."
+        print(f"{int(round(br/1024)):>5}k {name:{term_width - 15}} {int(duration):>6}s")
 
 
 if __name__ == '__main__':
